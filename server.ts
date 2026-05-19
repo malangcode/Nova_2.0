@@ -300,22 +300,30 @@ async function startServer() {
   // Helper to start/get remote
   async function getOrStartRemote(ip: string, certJson: string) {
     let remote = activeRemotes.get(ip);
+    
+    // If we have a remote but it's not the "full" one (e.g. from pairing) 
+    // or it was stopped, we might need to recreate it.
+    // For now, let's just use the existing one if it's there.
     if (remote) return remote;
 
+    console.log(`[TV] Initializing remote for ${ip}...`);
     remote = new AndroidRemote(ip, { cert: JSON.parse(certJson) });
     
+    // Add to map immediately to prevent parallel initialization attempts
+    activeRemotes.set(ip, remote);
+
     remote.on("error", (err: any) => {
-      console.error(`TV Remote Error (${ip}):`, err.message);
+      console.error(`[TV ERROR] ${ip}:`, err.message);
       activeRemotes.delete(ip);
     });
 
     remote.on("close", () => {
-      console.log(`TV Remote Connection Closed (${ip})`);
+      console.log(`[TV CLOSE] ${ip} connection closed`);
       activeRemotes.delete(ip);
     });
 
     remote.on("volume", (volume: any) => {
-      console.log(`TV Volume Update (${ip}):`, volume.level);
+      console.log(`[TV STATE] ${ip} volume:`, volume.level);
       tvState.set(ip, { 
         ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
         volume: volume.level,
@@ -324,16 +332,23 @@ async function startServer() {
     });
 
     remote.on("app", (app: string) => {
-      console.log(`TV Active App (${ip}):`, app);
+      console.log(`[TV STATE] ${ip} app:`, app);
       tvState.set(ip, {
         ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
         app: app
       });
     });
 
-    await remote.start();
-    activeRemotes.set(ip, remote);
-    return remote;
+    try {
+      const started = await remote.start();
+      console.log(`[TV] ${ip} started:`, started);
+      // Even if start returns false, sometimes it's actually working
+      return remote;
+    } catch (err: any) {
+      console.error(`[TV START ERROR] ${ip}:`, err.message);
+      activeRemotes.delete(ip);
+      throw err;
+    }
   }
 
   app.get("/api/tv/list", (req, res) => {
@@ -399,19 +414,20 @@ async function startServer() {
 
   app.post("/api/tv/command", async (req, res) => {
     let { ip, command, args } = req.body;
+    console.log(`[API] TV command received: ${command} for ${ip || 'default'}`);
     
-    // If IP is missing, try to use the last added TV
-    if (!ip) {
-      const lastTv = db.prepare("SELECT ip FROM tv_config ORDER BY timestamp DESC LIMIT 1").get() as any;
-      if (lastTv) ip = lastTv.ip;
-    }
-
-    if (!ip) return res.status(400).json({ error: "IP is required or no TV configured" });
-
-    const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get(ip) as any;
-    if (!tv) return res.status(404).json({ error: "TV configuration not found" });
-
     try {
+      // If IP is missing, try to use the last added TV
+      if (!ip) {
+        const lastTv = db.prepare("SELECT ip FROM tv_config ORDER BY timestamp DESC LIMIT 1").get() as any;
+        if (lastTv) ip = lastTv.ip;
+      }
+
+      if (!ip) return res.status(400).json({ error: "IP is required or no TV configured" });
+
+      const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get(ip) as any;
+      if (!tv) return res.status(404).json({ error: "TV configuration not found" });
+
       if (tv.cert) {
         const remote = await getOrStartRemote(ip, tv.cert);
         
@@ -433,22 +449,26 @@ async function startServer() {
         };
 
         if (keyMap[command]) {
-          console.log(`Executing TV Command: ${command} on ${ip}`);
-          remote.sendKey(keyMap[command]);
+          console.log(`[TV] Sending key ${command} to ${ip}`);
+          await remote.sendKey(keyMap[command]);
           return res.json({ success: true, state: tvState.get(ip) });
+        } else if (command === "launch") {
+          console.log(`[TV] Sending app link ${args} to ${ip}`);
+          await remote.sendAppLink(args);
+          return res.json({ success: true });
         }
       }
 
-      // ADB Fallback
+      // ADB Fallback if protocol fails or command not in protocol
       if (adbClient) {
+        console.log(`[TV] Attempting ADB fallback for ${command} on ${ip}`);
         const devices = await adbClient.listDevices();
         const device = devices.find((d: any) => d.id.includes(ip));
         
         if (device) {
           if (command === "launch") {
-            await adbClient.shell(device.id, `am start -a android.intent.action.VIEW -d ${args}`);
+            await adbClient.shell(device.id, `am start -a android.intent.action.VIEW -d "${args}"`);
           } else {
-            // generic keyevent for adb fallback
             const adbKeyMap: Record<string, string> = {
               "up": "19", "down": "20", "left": "21", "right": "22", "center": "23",
               "back": "4", "home": "3", "power": "26"
@@ -461,11 +481,12 @@ async function startServer() {
         }
       }
 
-      res.status(404).json({ error: "TV not reachable via Remote Protocol or ADB. Note: Cloud-to-Local network access is restricted." });
+      res.status(404).json({ error: "TV not reachable via Remote Protocol or ADB." });
     } catch (err: any) {
-      let errorMessage = err.message;
+      console.error(`[API ERROR] TV Command Failed:`, err);
+      let errorMessage = err.message || "Unknown error";
       if (errorMessage.includes("ETIMEDOUT") || errorMessage.includes("EHOSTUNREACH")) {
-        errorMessage = `TV unreachable: ${errorMessage}. Cloud environments cannot access local home network IPs directly.`;
+        errorMessage = `TV unreachable: Cloud environment cannot access your local network.`;
       }
       res.status(500).json({ error: errorMessage });
     }

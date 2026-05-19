@@ -353,8 +353,17 @@ async function startServer() {
   });
 
   app.post("/api/tv/command", async (req, res) => {
-    const { ip, command, args } = req.body;
-    const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get() as any;
+    let { ip, command, args } = req.body;
+    
+    // If IP is missing, try to use the last added TV
+    if (!ip) {
+      const lastTv = db.prepare("SELECT ip FROM tv_config ORDER BY timestamp DESC LIMIT 1").get() as any;
+      if (lastTv) ip = lastTv.ip;
+    }
+
+    if (!ip) return res.status(400).json({ error: "IP is required or no TV configured" });
+
+    const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get(ip) as any;
 
     try {
       if (tv?.cert) {

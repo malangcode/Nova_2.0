@@ -334,7 +334,7 @@ export default function AssistantPage() {
                       }
                     }
                   } else {
-                    responseText = "I cannot see anythink because the camera is off.";
+                    responseText = "I cannot see anything because the camera is off.";
                   }
 
                   setIsProcessing(false);

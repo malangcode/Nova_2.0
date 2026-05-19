@@ -223,14 +223,14 @@ export const rememberVisualEntityTool: FunctionDeclaration = {
 
 export const controlTvTool: FunctionDeclaration = {
   name: "control_tv",
-  description: "Control the Android TV. Send commands like 'up', 'down', 'left', 'right', 'center', 'back', 'home', 'power', 'volume_up', 'volume_down', 'mute', 'play', 'pause', or 'launch' an app via URL.",
+  description: "Control the Android TV. Send commands like 'up', 'down', 'left', 'right', 'center', 'back', 'home', 'power', 'volume_up', 'volume_down', 'mute', 'play', 'pause', or 'launch' an app via URL. For large volume changes, call this tool multiple times.",
   parameters: {
     type: Type.OBJECT,
     properties: {
       command: {
         type: Type.STRING,
         enum: ["up", "down", "left", "right", "center", "back", "home", "power", "volume_up", "volume_down", "mute", "play", "pause", "launch"],
-        description: "The remote control command."
+        description: "The remote control command. Use 'volume_up' or 'volume_down' for sound control."
       },
       args: {
         type: Type.STRING,

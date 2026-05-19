@@ -367,8 +367,27 @@ async function startServer() {
 
     try {
       if (tv?.cert) {
-        const remote = new AndroidRemote(ip, { cert: JSON.parse(tv.cert) });
-        await remote.start();
+        let remote = activeRemotes.get(ip);
+        
+        // If no active remote or it's not started, create/start it
+        if (!remote) {
+          remote = new AndroidRemote(ip, { cert: JSON.parse(tv.cert) });
+          activeRemotes.set(ip, remote);
+          
+          remote.on("error", (err: any) => {
+            console.error(`Remote Error (${ip}):`, err.message);
+            activeRemotes.delete(ip);
+          });
+
+          remote.on("close", () => {
+            console.log(`Remote connection closed (${ip})`);
+            activeRemotes.delete(ip);
+          });
+
+          await remote.start();
+          // Give it a small moment to stabilize after the start promise resolves
+          await new Promise(r => setTimeout(r, 150)); 
+        }
         
         // Map command strings to RemoteKeyCode
         const keyMap: Record<string, any> = {
@@ -388,9 +407,9 @@ async function startServer() {
         };
 
         if (keyMap[command]) {
+          console.log(`Executing TV Command: ${command} on ${ip}`);
           remote.sendKey(keyMap[command]);
-          setTimeout(() => remote.stop(), 1000);
-          return res.json({ success: true });
+          return res.json({ success: true, persistent: true });
         }
       }
 

@@ -5,6 +5,8 @@ import Database from "better-sqlite3";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import { AndroidRemote, RemoteKeyCode } from "androidtv-remote";
+import adb from "adbkit";
 
 dotenv.config();
 
@@ -42,6 +44,15 @@ db.exec(`
     face_embedding TEXT, -- Stored as JSON string
     image_snapshot TEXT, -- Base64 string
     description TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS tv_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT UNIQUE,
+    name TEXT,
+    cert TEXT, -- JSON string
+    adb_enabled INTEGER DEFAULT 0,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
@@ -272,6 +283,137 @@ async function startServer() {
     } catch (err) {
       console.error("Error clearing visual memories:", err);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // TV Control API
+  const activeRemotes = new Map<string, any>();
+  let adbClient: any = null;
+  
+  try {
+    adbClient = adb.createClient();
+  } catch (e) {
+    console.warn("ADB Client could not be initialized:", e);
+  }
+
+  app.get("/api/tv/list", (req, res) => {
+    try {
+      const tvs = db.prepare("SELECT * FROM tv_config").all();
+      res.json(tvs);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to list TVs" });
+    }
+  });
+
+  app.post("/api/tv/pair/start", async (req, res) => {
+    const { ip } = req.body;
+    if (!ip) return res.status(400).json({ error: "IP is required" });
+
+    try {
+      const remote = new AndroidRemote(ip, {});
+      activeRemotes.set(ip, remote);
+
+      remote.on("secret", () => {
+        if (!res.headersSent) res.json({ success: true, message: "PIN requested on TV" });
+      });
+
+      remote.on("error", (err) => {
+        console.error("Remote Error:", err);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+
+      await remote.start();
+    } catch (err: any) {
+      let errorMessage = err.message;
+      if (errorMessage.includes("ETIMEDOUT") || errorMessage.includes("EHOSTUNREACH")) {
+        errorMessage = `Connection timed out to ${ip}. Since this application is running in a cloud environment, it cannot reach devices on your private local network (192.168.x.x, 10.x.x.x, etc.). Please ensure the TV is reachable from the public internet or run this application locally.`;
+      }
+      if (!res.headersSent) res.status(500).json({ error: errorMessage });
+    }
+  });
+
+  app.post("/api/tv/pair/pin", async (req, res) => {
+    const { ip, pin } = req.body;
+    const remote = activeRemotes.get(ip);
+    if (!remote) return res.status(400).json({ error: "Pairing session not found" });
+
+    try {
+      await remote.sendCode(pin);
+      const cert = remote.getCertificate();
+      db.prepare("INSERT OR REPLACE INTO tv_config (ip, cert, name) VALUES (?, ?, ?)")
+        .run(ip, JSON.stringify(cert), "Android TV");
+      if (!res.headersSent) res.json({ success: true, message: "Pairing successful" });
+    } catch (err: any) {
+      let errorMessage = err.message;
+      if (errorMessage.includes("ETIMEDOUT") || errorMessage.includes("EHOSTUNREACH")) {
+        errorMessage = `Network error: Cannot reach ${ip} from the cloud.`;
+      }
+      if (!res.headersSent) res.status(500).json({ error: errorMessage });
+    }
+  });
+
+  app.post("/api/tv/command", async (req, res) => {
+    const { ip, command, args } = req.body;
+    const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get() as any;
+
+    try {
+      if (tv?.cert) {
+        const remote = new AndroidRemote(ip, { cert: JSON.parse(tv.cert) });
+        await remote.start();
+        
+        // Map command strings to RemoteKeyCode
+        const keyMap: Record<string, any> = {
+          "up": RemoteKeyCode.UP,
+          "down": RemoteKeyCode.DOWN,
+          "left": RemoteKeyCode.LEFT,
+          "right": RemoteKeyCode.RIGHT,
+          "center": RemoteKeyCode.CENTER,
+          "back": RemoteKeyCode.BACK,
+          "home": RemoteKeyCode.HOME,
+          "power": RemoteKeyCode.POWER,
+          "volume_up": RemoteKeyCode.VOLUME_UP,
+          "volume_down": RemoteKeyCode.VOLUME_DOWN,
+          "mute": RemoteKeyCode.MUTE,
+          "play": RemoteKeyCode.PLAY,
+          "pause": RemoteKeyCode.PAUSE,
+        };
+
+        if (keyMap[command]) {
+          remote.sendKey(keyMap[command]);
+          setTimeout(() => remote.stop(), 1000);
+          return res.json({ success: true });
+        }
+      }
+
+      // ADB Fallback
+      if (adbClient) {
+        const devices = await adbClient.listDevices();
+        const device = devices.find((d: any) => d.id.includes(ip));
+        
+        if (device) {
+          if (command === "launch") {
+            await adbClient.shell(device.id, `am start -a android.intent.action.VIEW -d ${args}`);
+          } else {
+            // generic keyevent for adb fallback
+            const adbKeyMap: Record<string, string> = {
+              "up": "19", "down": "20", "left": "21", "right": "22", "center": "23",
+              "back": "4", "home": "3", "power": "26"
+            };
+            if (adbKeyMap[command]) {
+              await adbClient.shell(device.id, `input keyevent ${adbKeyMap[command]}`);
+            }
+          }
+          return res.json({ success: true, mechanism: "adb" });
+        }
+      }
+
+      res.status(404).json({ error: "TV not reachable via Remote Protocol or ADB. Note: Cloud-to-Local network access is restricted." });
+    } catch (err: any) {
+      let errorMessage = err.message;
+      if (errorMessage.includes("ETIMEDOUT") || errorMessage.includes("EHOSTUNREACH")) {
+        errorMessage = `TV unreachable: ${errorMessage}. Cloud environments cannot access local home network IPs directly.`;
+      }
+      res.status(500).json({ error: errorMessage });
     }
   });
 

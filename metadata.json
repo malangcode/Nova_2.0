@@ -1,6 +1,9 @@
 {
   "name": "Remix: VisionVoice AI Assistant",
   "description": "A real-time AI assistant with vision, voice, and long-term memory capabilities using Gemini Live API.",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
   "requestFramePermissions": [
     "camera",
     "microphone"

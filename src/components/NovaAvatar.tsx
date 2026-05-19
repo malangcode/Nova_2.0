@@ -257,11 +257,8 @@ export const NovaAvatar = (props: AvatarProps) => {
   return (
     <div className="w-full h-full min-h-[400px]">
       <Canvas 
-        shadows 
+        shadows={{ type: THREE.PCFShadowMap }}
         dpr={[1, 2]} 
-        onCreated={({ gl }) => {
-          gl.shadowMap.type = THREE.PCFShadowMap;
-        }}
       >
         <PerspectiveCamera makeDefault position={[0, 0, 4]} fov={35} />
         <ambientLight intensity={0.5} />

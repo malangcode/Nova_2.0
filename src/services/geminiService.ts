@@ -221,6 +221,45 @@ export const rememberVisualEntityTool: FunctionDeclaration = {
   }
 };
 
+export const controlTvTool: FunctionDeclaration = {
+  name: "control_tv",
+  description: "Control the Android TV. Send commands like 'up', 'down', 'left', 'right', 'center', 'back', 'home', 'power', 'volume_up', 'volume_down', 'mute', 'play', 'pause', or 'launch' an app via URL.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      command: {
+        type: Type.STRING,
+        enum: ["up", "down", "left", "right", "center", "back", "home", "power", "volume_up", "volume_down", "mute", "play", "pause", "launch"],
+        description: "The remote control command."
+      },
+      args: {
+        type: Type.STRING,
+        description: "Arguments for the command (e.g., YouTube URL for 'launch')."
+      },
+      ip: {
+        type: Type.STRING,
+        description: "Target TV IP (optional if only one TV is configured)."
+      }
+    },
+    required: ["command"]
+  }
+};
+
+export const setupTvTool: FunctionDeclaration = {
+  name: "setup_tv",
+  description: "Initiate pairing with an Android TV. Use this when the user says 'Connect my TV' or 'Setup TV control'.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      ip: {
+        type: Type.STRING,
+        description: "The IP address of the Android TV."
+      }
+    },
+    required: ["ip"]
+  }
+};
+
 export async function getLongTermSummary(): Promise<string> {
   try {
     const res = await fetch('/api/summary');
@@ -297,6 +336,39 @@ export async function clearVisualMemories() {
   } catch (err) {
     console.error("Failed to clear visual memories:", err);
   }
+}
+
+// TV Control Services
+export async function startTvPairing(ip: string) {
+  const res = await fetch('/api/tv/pair/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip }),
+  });
+  return res.json();
+}
+
+export async function submitTvPin(ip: string, pin: string) {
+  const res = await fetch('/api/tv/pair/pin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip, pin }),
+  });
+  return res.json();
+}
+
+export async function sendTvCommand(command: string, args?: string, ip?: string) {
+  const res = await fetch('/api/tv/command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command, args, ip }),
+  });
+  return res.json();
+}
+
+export async function listTvs() {
+  const res = await fetch('/api/tv/list');
+  return res.json();
 }
 
 export async function generateNewSummary(longTermMemories: string[], currentSummary: string): Promise<string> {

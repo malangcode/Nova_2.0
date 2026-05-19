@@ -16,11 +16,16 @@ import {
   storeMemoryTool, 
   searchMemoryTool,
   rememberVisualEntityTool,
+  controlTvTool,
+  setupTvTool,
   getLongTermSummary,
   updateLongTermSummary,
   generateNewSummary,
   storeVisualMemory,
   listVisualMemories,
+  startTvPairing,
+  submitTvPin,
+  sendTvCommand,
   VisualMemory,
   DualMemories
 } from "../services/geminiService";
@@ -33,6 +38,9 @@ export default function AssistantPage() {
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isMicOn, setIsMicOn] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showTvPinModal, setShowTvPinModal] = useState(false);
+  const [tvIp, setTvIp] = useState("");
+  const [tvPin, setTvPin] = useState("");
   
   const isLiveRef = useRef(false);
   const isMicOnRef = useRef(false);
@@ -228,7 +236,7 @@ export default function AssistantPage() {
           systemInstruction,
           tools: [
             {
-              functionDeclarations: [storeMemoryTool, searchMemoryTool, rememberVisualEntityTool]
+              functionDeclarations: [storeMemoryTool, searchMemoryTool, rememberVisualEntityTool, setupTvTool, controlTvTool]
             }
           ]
         },
@@ -250,7 +258,8 @@ export default function AssistantPage() {
             }).catch(err => console.error("Initial greeting failed:", err));
           },
           onmessage: async (message: LiveServerMessage) => {
-            console.log("Live Message Received:", message);
+            // Log important events but avoid logging full binary/audio chunks to keep console clean
+            if (message.toolCall) console.log("Nova Tool Call:", message.toolCall);
             
             // Handle Tool Calls
             if (message.toolCall) {
@@ -336,6 +345,47 @@ export default function AssistantPage() {
                           name: "remember_visual_entity",
                           id: call.id,
                           response: { output: responseText }
+                        }]
+                      });
+                    }
+                  });
+                } else if (call.name === "setup_tv") {
+                  const { ip } = call.args as any;
+                  console.log("Setting up TV at IP:", ip);
+                  setIsProcessing(true);
+                  const result = await startTvPairing(ip);
+                  setIsProcessing(false);
+                  
+                  if (result.success) {
+                    setTvIp(ip);
+                    setShowTvPinModal(true);
+                  }
+
+                  sessionPromise.then(session => {
+                    if (session) {
+                      (session as any).sendToolResponse({
+                        functionResponses: [{
+                          name: "setup_tv",
+                          id: call.id,
+                          response: { output: result.success ? "Initiated pairing. Please enter the 6-digit PIN shown on your TV." : result.error }
+                        }]
+                      });
+                    }
+                  });
+                } else if (call.name === "control_tv") {
+                  const { command, args, ip } = call.args as any;
+                  console.log(`Sending TV command: ${command} with args: ${args}`);
+                  setIsProcessing(true);
+                  const result = await sendTvCommand(command, args, ip);
+                  setIsProcessing(false);
+
+                  sessionPromise.then(session => {
+                    if (session) {
+                      (session as any).sendToolResponse({
+                        functionResponses: [{
+                          name: "control_tv",
+                          id: call.id,
+                          response: { output: result.success ? "Command sent successfully." : result.error }
                         }]
                       });
                     }
@@ -594,8 +644,9 @@ export default function AssistantPage() {
               });
               
               chunksSent++;
-              if (Date.now() - lastSendTime > 5000) {
-                console.log(`Live Session: Sent ${chunksSent} audio chunks at ${sampleRate}Hz. Volume: ${avg.toFixed(4)}`);
+              if (Date.now() - lastSendTime > 10000) {
+                // Toned down log, every 10s
+                console.log("Audio streaming active...");
                 lastSendTime = Date.now();
                 chunksSent = 0;
               }
@@ -716,6 +767,26 @@ export default function AssistantPage() {
     }
   };
 
+  const handleTvPinSubmit = async () => {
+    if (!tvIp || !tvPin) return;
+    setIsProcessing(true);
+    const result = await submitTvPin(tvIp, tvPin);
+    setIsProcessing(false);
+    if (result.success) {
+      setShowTvPinModal(false);
+      setTvPin("");
+      // Notify Nova session if active
+      const session = await sessionRef.current;
+      if (session) {
+        session.sendRealtimeInput([{
+          parts: [{ text: "[SYSTEM: TV Pairing was successful. Notify the user they can now control their TV using voice commands.]" }]
+        }]);
+      }
+    } else {
+      alert("Pairing failed: " + result.error);
+    }
+  };
+
   return (
     <div className="relative flex flex-col h-screen w-full bg-[#050505] overflow-hidden select-none">
       <ConfirmModal 
@@ -726,6 +797,53 @@ export default function AssistantPage() {
         message="This will permanently erase ALL stored memories, preferences, and facts Nova has learned about you. She will start fresh as if meeting you for the first time."
         confirmText="Wipe Everything"
       />
+
+      {/* TV Pin Modal */}
+      <AnimatePresence>
+        {showTvPinModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-6"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="w-full max-w-md bg-[#0D0D0D] border border-white/10 rounded-3xl p-8 shadow-2xl space-y-6"
+            >
+              <div className="text-center space-y-2">
+                <h2 className="text-2xl font-bold text-white tracking-tight">Enter TV PIN</h2>
+                <p className="text-white/40 text-sm">Please type the 6-digit code displayed on your screen.</p>
+              </div>
+              
+              <input 
+                type="text" 
+                maxLength={6}
+                value={tvPin}
+                onChange={(e) => setTvPin(e.target.value)}
+                placeholder="000000"
+                className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 text-center text-3xl font-mono tracking-[0.5em] text-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+              />
+
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setShowTvPinModal(false)}
+                  className="flex-1 py-4 bg-white/5 hover:bg-white/10 text-white font-bold rounded-2xl transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleTvPinSubmit}
+                  className="flex-1 py-4 bg-emerald-500 hover:bg-emerald-600 text-black font-bold rounded-2xl transition-all"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Neural Processing Indicator */}
       <AnimatePresence>

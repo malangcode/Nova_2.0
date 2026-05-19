@@ -6,7 +6,6 @@ import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { AndroidRemote, RemoteKeyCode, RemoteDirection } from "androidtv-remote";
-import adb from "adbkit";
 
 dotenv.config();
 
@@ -290,13 +289,6 @@ async function startServer() {
   const activeRemotes = new Map<string, any>();
   const initializationPromises = new Map<string, Promise<any>>();
   const tvState = new Map<string, { volume: number, muted: boolean, app: string }>();
-  let adbClient: any = null;
-  
-  try {
-    adbClient = adb.createClient();
-  } catch (e) {
-    console.warn("ADB Client could not be initialized:", e);
-  }
 
   // Helper to start/get remote
   async function getOrStartRemote(ip: string, certJson: string) {
@@ -452,65 +444,44 @@ async function startServer() {
       const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get(ip) as any;
       if (!tv) return res.status(404).json({ error: "TV configuration not found" });
 
-      if (tv.cert) {
-        const remote = await getOrStartRemote(ip, tv.cert);
-        
-        // Map command strings to RemoteKeyCode
-        const keyMap: Record<string, any> = {
-          "up": RemoteKeyCode.UP,
-          "down": RemoteKeyCode.DOWN,
-          "left": RemoteKeyCode.LEFT,
-          "right": RemoteKeyCode.RIGHT,
-          "center": RemoteKeyCode.CENTER,
-          "back": RemoteKeyCode.BACK,
-          "home": RemoteKeyCode.HOME,
-          "power": RemoteKeyCode.POWER,
-          "volume_up": RemoteKeyCode.VOLUME_UP,
-          "volume_down": RemoteKeyCode.VOLUME_DOWN,
-          "mute": RemoteKeyCode.MUTE,
-          "play": RemoteKeyCode.PLAY,
-          "pause": RemoteKeyCode.PAUSE,
-        };
+      const keyMap: Record<string, any> = {
+        "up": RemoteKeyCode.KEYCODE_DPAD_UP,
+        "down": RemoteKeyCode.KEYCODE_DPAD_DOWN,
+        "left": RemoteKeyCode.KEYCODE_DPAD_LEFT,
+        "right": RemoteKeyCode.KEYCODE_DPAD_RIGHT,
+        "center": RemoteKeyCode.KEYCODE_DPAD_CENTER,
+        "back": RemoteKeyCode.KEYCODE_BACK,
+        "home": RemoteKeyCode.KEYCODE_HOME,
+        "power": RemoteKeyCode.KEYCODE_POWER,
+        "volume_up": RemoteKeyCode.KEYCODE_VOLUME_UP,
+        "volume_down": RemoteKeyCode.KEYCODE_VOLUME_DOWN,
+        "mute": RemoteKeyCode.KEYCODE_VOLUME_MUTE,
+        "play": RemoteKeyCode.KEYCODE_MEDIA_PLAY,
+        "pause": RemoteKeyCode.KEYCODE_MEDIA_PAUSE,
+      };
 
-        if (keyMap[command]) {
-          console.log(`[TV] Sending key ${command} to ${ip} with RemoteDirection.SHORT`);
+      if (keyMap[command] !== undefined) {
+        if (tv.cert) {
+          const remote = await getOrStartRemote(ip, tv.cert);
+          console.log(`[TV] Sending key ${command} (${keyMap[command]}) to ${ip}`);
           await remote.sendKey(keyMap[command], RemoteDirection.SHORT);
-          return res.json({ success: true, state: tvState.get(ip) });
-        } else if (command === "launch") {
+          return res.json({ success: true, state: tvState.get(ip) || { volume: 0, muted: false, app: "unknown" } });
+        }
+      } else if (command === "launch") {
+        if (tv.cert) {
+          const remote = await getOrStartRemote(ip, tv.cert);
           console.log(`[TV] Sending app link ${args} to ${ip}`);
           await remote.sendAppLink(args);
           return res.json({ success: true });
         }
       }
 
-      // ADB Fallback if protocol fails or command not in protocol
-      if (adbClient) {
-        console.log(`[TV] Attempting ADB fallback for ${command} on ${ip}`);
-        const devices = await adbClient.listDevices();
-        const device = devices.find((d: any) => d.id.includes(ip));
-        
-        if (device) {
-          if (command === "launch") {
-            await adbClient.shell(device.id, `am start -a android.intent.action.VIEW -d "${args}"`);
-          } else {
-            const adbKeyMap: Record<string, string> = {
-              "up": "19", "down": "20", "left": "21", "right": "22", "center": "23",
-              "back": "4", "home": "3", "power": "26"
-            };
-            if (adbKeyMap[command]) {
-              await adbClient.shell(device.id, `input keyevent ${adbKeyMap[command]}`);
-            }
-          }
-          return res.json({ success: true, mechanism: "adb" });
-        }
-      }
-
-      res.status(404).json({ error: "TV not reachable via Remote Protocol or ADB." });
+      res.status(400).json({ error: "Unknown command or missing certificate." });
     } catch (err: any) {
       console.error(`[API ERROR] TV Command Failed:`, err);
       let errorMessage = err.message || "Unknown error";
       if (errorMessage.includes("ETIMEDOUT") || errorMessage.includes("EHOSTUNREACH")) {
-        errorMessage = `TV unreachable: Cloud environment cannot access your local network.`;
+        errorMessage = `TV unreachable: Cloud environment cannot access your local network IPs directly.`;
       }
       res.status(500).json({ error: errorMessage });
     }

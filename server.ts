@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
-import { AndroidRemote, RemoteKeyCode } from "androidtv-remote";
+import { AndroidRemote, RemoteKeyCode, RemoteDirection } from "androidtv-remote";
 import adb from "adbkit";
 
 dotenv.config();
@@ -288,6 +288,7 @@ async function startServer() {
 
   // TV Control API
   const activeRemotes = new Map<string, any>();
+  const initializationPromises = new Map<string, Promise<any>>();
   const tvState = new Map<string, { volume: number, muted: boolean, app: string }>();
   let adbClient: any = null;
   
@@ -299,56 +300,79 @@ async function startServer() {
 
   // Helper to start/get remote
   async function getOrStartRemote(ip: string, certJson: string) {
-    let remote = activeRemotes.get(ip);
-    
-    // If we have a remote but it's not the "full" one (e.g. from pairing) 
-    // or it was stopped, we might need to recreate it.
-    // For now, let's just use the existing one if it's there.
-    if (remote) return remote;
+    // If there's an active remote that seems healthy, use it
+    const existingRemote = activeRemotes.get(ip);
+    if (existingRemote) return existingRemote;
 
-    console.log(`[TV] Initializing remote for ${ip}...`);
-    remote = new AndroidRemote(ip, { cert: JSON.parse(certJson) });
-    
-    // Add to map immediately to prevent parallel initialization attempts
-    activeRemotes.set(ip, remote);
+    // If we're already initializing this IP, wait for it
+    const inProgress = initializationPromises.get(ip);
+    if (inProgress) return inProgress;
 
-    remote.on("error", (err: any) => {
-      console.error(`[TV ERROR] ${ip}:`, err.message);
-      activeRemotes.delete(ip);
-    });
-
-    remote.on("close", () => {
-      console.log(`[TV CLOSE] ${ip} connection closed`);
-      activeRemotes.delete(ip);
-    });
-
-    remote.on("volume", (volume: any) => {
-      console.log(`[TV STATE] ${ip} volume:`, volume.level);
-      tvState.set(ip, { 
-        ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
-        volume: volume.level,
-        muted: volume.muted
+    const initPromise = (async () => {
+      console.log(`[TV] Initializing remote for ${ip}...`);
+      const remote = new AndroidRemote(ip, { cert: JSON.parse(certJson) });
+      
+      remote.on("error", (err: any) => {
+        console.error(`[TV ERROR] ${ip}:`, err.message);
+        activeRemotes.delete(ip);
+        initializationPromises.delete(ip);
       });
-    });
 
-    remote.on("app", (app: string) => {
-      console.log(`[TV STATE] ${ip} app:`, app);
-      tvState.set(ip, {
-        ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
-        app: app
+      remote.on("close", () => {
+        console.log(`[TV CLOSE] ${ip} connection closed`);
+        activeRemotes.delete(ip);
+        initializationPromises.delete(ip);
       });
-    });
 
-    try {
-      const started = await remote.start();
-      console.log(`[TV] ${ip} started:`, started);
-      // Even if start returns false, sometimes it's actually working
-      return remote;
-    } catch (err: any) {
-      console.error(`[TV START ERROR] ${ip}:`, err.message);
-      activeRemotes.delete(ip);
-      throw err;
-    }
+      remote.on("volume", (volume: any) => {
+        console.log(`[TV STATE] ${ip} volume:`, volume.level);
+        tvState.set(ip, { 
+          ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
+          volume: volume.level,
+          muted: volume.muted
+        });
+      });
+
+      remote.on("app", (app: string) => {
+        console.log(`[TV STATE] ${ip} app:`, app);
+        tvState.set(ip, {
+          ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
+          app: app
+        });
+      });
+
+      try {
+        // start() resolves when TLS connects
+        await remote.start();
+        
+        // We wait for the "ready" event which means handshake is done
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("Timeout waiting for TV handshake")), 5000);
+          remote.once("ready", () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
+          // If powered event comes first, it usually means it's also ready
+          remote.once("powered", () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
+        });
+
+        console.log(`[TV] ${ip} is ready for commands`);
+        activeRemotes.set(ip, remote);
+        return remote;
+      } catch (err: any) {
+        console.error(`[TV START ERROR] ${ip}:`, err.message);
+        activeRemotes.delete(ip);
+        throw err;
+      } finally {
+        initializationPromises.delete(ip);
+      }
+    })();
+
+    initializationPromises.set(ip, initPromise);
+    return initPromise;
   }
 
   app.get("/api/tv/list", (req, res) => {
@@ -449,8 +473,8 @@ async function startServer() {
         };
 
         if (keyMap[command]) {
-          console.log(`[TV] Sending key ${command} to ${ip}`);
-          await remote.sendKey(keyMap[command]);
+          console.log(`[TV] Sending key ${command} to ${ip} with RemoteDirection.SHORT`);
+          await remote.sendKey(keyMap[command], RemoteDirection.SHORT);
           return res.json({ success: true, state: tvState.get(ip) });
         } else if (command === "launch") {
           console.log(`[TV] Sending app link ${args} to ${ip}`);

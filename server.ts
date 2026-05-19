@@ -288,6 +288,7 @@ async function startServer() {
 
   // TV Control API
   const activeRemotes = new Map<string, any>();
+  const tvState = new Map<string, { volume: number, muted: boolean, app: string }>();
   let adbClient: any = null;
   
   try {
@@ -296,12 +297,56 @@ async function startServer() {
     console.warn("ADB Client could not be initialized:", e);
   }
 
+  // Helper to start/get remote
+  async function getOrStartRemote(ip: string, certJson: string) {
+    let remote = activeRemotes.get(ip);
+    if (remote) return remote;
+
+    remote = new AndroidRemote(ip, { cert: JSON.parse(certJson) });
+    
+    remote.on("error", (err: any) => {
+      console.error(`TV Remote Error (${ip}):`, err.message);
+      activeRemotes.delete(ip);
+    });
+
+    remote.on("close", () => {
+      console.log(`TV Remote Connection Closed (${ip})`);
+      activeRemotes.delete(ip);
+    });
+
+    remote.on("volume", (volume: any) => {
+      console.log(`TV Volume Update (${ip}):`, volume.level);
+      tvState.set(ip, { 
+        ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
+        volume: volume.level,
+        muted: volume.muted
+      });
+    });
+
+    remote.on("app", (app: string) => {
+      console.log(`TV Active App (${ip}):`, app);
+      tvState.set(ip, {
+        ...tvState.get(ip) || { volume: 0, muted: false, app: "unknown" },
+        app: app
+      });
+    });
+
+    await remote.start();
+    activeRemotes.set(ip, remote);
+    return remote;
+  }
+
   app.get("/api/tv/list", (req, res) => {
     try {
-      const tvs = db.prepare("SELECT * FROM tv_config").all();
-      res.json(tvs);
-    } catch (err) {
-      res.status(500).json({ error: "Failed to list TVs" });
+      const tvs = db.prepare("SELECT * FROM tv_config").all() as any[];
+      const enrichedTvs = tvs.map(tv => ({
+        ...tv,
+        status: activeRemotes.has(tv.ip) ? "connected" : "offline",
+        state: tvState.get(tv.ip) || { volume: 0, muted: false, app: "unknown" }
+      }));
+      res.json(enrichedTvs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -364,30 +409,11 @@ async function startServer() {
     if (!ip) return res.status(400).json({ error: "IP is required or no TV configured" });
 
     const tv = db.prepare("SELECT * FROM tv_config WHERE ip = ?").get(ip) as any;
+    if (!tv) return res.status(404).json({ error: "TV configuration not found" });
 
     try {
-      if (tv?.cert) {
-        let remote = activeRemotes.get(ip);
-        
-        // If no active remote or it's not started, create/start it
-        if (!remote) {
-          remote = new AndroidRemote(ip, { cert: JSON.parse(tv.cert) });
-          activeRemotes.set(ip, remote);
-          
-          remote.on("error", (err: any) => {
-            console.error(`Remote Error (${ip}):`, err.message);
-            activeRemotes.delete(ip);
-          });
-
-          remote.on("close", () => {
-            console.log(`Remote connection closed (${ip})`);
-            activeRemotes.delete(ip);
-          });
-
-          await remote.start();
-          // Give it a small moment to stabilize after the start promise resolves
-          await new Promise(r => setTimeout(r, 150)); 
-        }
+      if (tv.cert) {
+        const remote = await getOrStartRemote(ip, tv.cert);
         
         // Map command strings to RemoteKeyCode
         const keyMap: Record<string, any> = {
@@ -409,7 +435,7 @@ async function startServer() {
         if (keyMap[command]) {
           console.log(`Executing TV Command: ${command} on ${ip}`);
           remote.sendKey(keyMap[command]);
-          return res.json({ success: true, persistent: true });
+          return res.json({ success: true, state: tvState.get(ip) });
         }
       }
 
